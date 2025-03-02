@@ -3,18 +3,23 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+import re
 
 # Global variable for CSV file path - change this to match your file location
-CSV_FILE_PATH = "Data/train.csv"
+CSV_FILE_PATH = "Data/smmh.csv"
 
 # Page configuration
 st.set_page_config(
     layout="wide", 
-    page_title="Social Media & Mental Health Dashboard",
-    page_icon="📱",
+    page_title="Social Media & Mental Health Analysis",
+    page_icon="🧠",
     initial_sidebar_state="expanded"
 )
 
@@ -34,10 +39,11 @@ def get_theme_specific_colors():
         background_color = "#1E1E1E"
         box_background = "#2D2D2D"
         border_color = "#BB86FC"
-        chart_colors = ["#BB86FC", "#03DAC6", "#CF6679", "#FFAB40"]
+        chart_colors = ["#BB86FC", "#03DAC6", "#CF6679", "#FFAB40", "#80D8FF", "#B388FF"]
         positive_color = "#03DAC6"   # Teal
         neutral_color = "#FFAB40"    # Amber
         negative_color = "#CF6679"   # Pink
+        gradient_colors = ["#CF6679", "#FFAB40", "#03DAC6"]  # Negative to Positive
     else:
         # Light theme colors
         header_color = "#6200EE"
@@ -46,10 +52,11 @@ def get_theme_specific_colors():
         background_color = "#FFFFFF"
         box_background = "#F5F5F5"
         border_color = "#6200EE"
-        chart_colors = ["#6200EE", "#03DAC6", "#B00020", "#FF6D00"]
+        chart_colors = ["#6200EE", "#03DAC6", "#B00020", "#FF6D00", "#0091EA", "#7C4DFF"]
         positive_color = "#03DAC6"   # Teal
         neutral_color = "#FF6D00"    # Orange
         negative_color = "#B00020"   # Red
+        gradient_colors = ["#B00020", "#FF6D00", "#03DAC6"]  # Negative to Positive
     
     return {
         "header_color": header_color,
@@ -62,6 +69,7 @@ def get_theme_specific_colors():
         "positive_color": positive_color,
         "neutral_color": neutral_color,
         "negative_color": negative_color,
+        "gradient_colors": gradient_colors,
     }
 
 # Get theme colors
@@ -122,13 +130,274 @@ st.markdown(f"""
     .st-emotion-cache-1y4p8pa {{
         max-width: 1200px;
     }}
+    .score-badge {{
+        display: inline-block;
+        padding: 0.25em 0.6em;
+        font-size: 0.9rem;
+        font-weight: 700;
+        line-height: 1;
+        text-align: center;
+        white-space: nowrap;
+        vertical-align: baseline;
+        border-radius: 0.25rem;
+    }}
+    .good {{
+        background-color: {theme["positive_color"]};
+        color: #fff;
+    }}
+    .moderate {{
+        background-color: {theme["neutral_color"]};
+        color: #fff;
+    }}
+    .poor {{
+        background-color: {theme["negative_color"]};
+        color: #fff;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
-# Helper function to clean field names for display
-def clean_field_name(field_name):
-    # Replace underscores with spaces and capitalize each word
-    return field_name.replace('_', ' ').replace('(', '(').replace(')', ')').title()
+# Helper functions
+def clean_column_name(col):
+    """Clean column names for display by removing numbers and question marks"""
+    if isinstance(col, str):
+        # Remove the question number if present
+        col = re.sub(r'^\d+\.\s*', '', col)
+        # Remove question marks
+        col = col.replace('?', '')
+        # Capitalize only the first letter
+        col = col.strip().capitalize()
+    return col
+
+def get_mental_health_category(score):
+    """Convert mental health score to category with color."""
+    if score >= 75:
+        return "Excellent", theme["positive_color"]
+    elif score >= 60:
+        return "Good", theme["positive_color"]
+    elif score >= 45:
+        return "Moderate", theme["neutral_color"]
+    elif score >= 30:
+        return "Concerning", theme["negative_color"]
+    else:
+        return "Poor", theme["negative_color"]
+
+def convert_time_to_minutes(time_str):
+    """Convert time range strings to approximate minutes for analysis."""
+    if pd.isna(time_str) or time_str == "":
+        return np.nan
+    
+    # Convert to string if not already and normalize
+    time_str = str(time_str).strip()
+    
+    # Handle the exact formats that appear in the dataset
+    if time_str == "More than 5 hours":
+        return 330  # Assuming average of 5.5 hours (330 minutes)
+    elif time_str == "Between 1 and 2 hours":
+        return 90   # Assuming average of 1.5 hours (90 minutes)
+    elif time_str == "Between 2 and 3 hours":
+        return 150  # Assuming average of 2.5 hours (150 minutes)
+    elif time_str == "Between 3 and 4 hours":
+        return 210  # Assuming average of 3.5 hours (210 minutes)
+    elif time_str == "Between 4 and 5 hours":
+        return 270  # Assuming average of 4.5 hours (270 minutes)
+    
+    # For any other formats, use more generic pattern matching (as fallback)
+    time_str_lower = time_str.lower()
+    
+    if any(x in time_str_lower for x in ["less than 1 hour", "< 1 hour", "0-1 hour", "under 1 hour"]):
+        return 30  # Assuming average of 30 minutes
+    elif any(x in time_str_lower for x in ["1-2 hour", "1-2 hours", "1 to 2 hour", "1 to 2 hours", "between 1 and 2"]):
+        return 90  # Assuming average of 1.5 hours (90 minutes)
+    elif any(x in time_str_lower for x in ["2-3 hour", "2-3 hours", "2 to 3 hour", "2 to 3 hours", "between 2 and 3"]):
+        return 150  # Assuming average of 2.5 hours (150 minutes)
+    elif any(x in time_str_lower for x in ["3-4 hour", "3-4 hours", "3 to 4 hour", "3 to 4 hours", "between 3 and 4"]):
+        return 210  # Assuming average of 3.5 hours (210 minutes)
+    elif any(x in time_str_lower for x in ["4-5 hour", "4-5 hours", "4 to 5 hour", "4 to 5 hours", "between 4 and 5"]):
+        return 270  # Assuming average of 4.5 hours (270 minutes)
+    elif any(x in time_str_lower for x in ["more than 5 hour", "more than 5 hours", "> 5 hour", "> 5 hours", "5+ hour", "5+ hours"]):
+        return 330  # Assuming average of 5.5 hours (330 minutes)
+    # Handle exact hour values
+    elif "1 hour" == time_str_lower:
+        return 60
+    elif "2 hour" == time_str_lower or "2 hours" == time_str_lower:
+        return 120
+    elif "3 hour" == time_str_lower or "3 hours" == time_str_lower:
+        return 180
+    elif "4 hour" == time_str_lower or "4 hours" == time_str_lower:
+        return 240
+    elif "5 hour" == time_str_lower or "5 hours" == time_str_lower:
+        return 300
+    # Handle minute-based formats
+    elif "minutes" in time_str_lower or "mins" in time_str_lower or "min" in time_str_lower:
+        # Extract numbers from the string
+        import re
+        numbers = re.findall(r'\d+', time_str_lower)
+        if numbers:
+            try:
+                # Use the first number found
+                return int(numbers[0])
+            except:
+                return np.nan
+    else:
+        # For debugging, uncomment this line to see unmatched strings
+        # print(f"No match found for: '{time_str}'")
+        return np.nan
+
+def calculate_mental_health_score(df):
+    """Calculate mental health score based on indicators in the dataset."""
+    # Select relevant columns for mental health
+    mental_health_columns = [
+        '12. On a scale of 1 to 5, how easily distracted are you?',
+        '13. On a scale of 1 to 5, how much are you bothered by worries?',
+        '14. Do you find it difficult to concentrate on things?',
+        '15. On a scale of 1-5, how often do you compare yourself to other successful people through the use of social media?',
+        '16. Following the previous question, how do you feel about these comparisons, generally speaking?',
+        '17. How often do you look to seek validation from features of social media?',
+        '18. How often do you feel depressed or down?',
+        '19. On a scale of 1 to 5, how frequently does your interest in daily activities fluctuate?',
+        '20. On a scale of 1 to 5, how often do you face issues regarding sleep?'
+    ]
+    
+    # Check if all required columns exist
+    available_columns = [col for col in mental_health_columns if col in df.columns]
+    
+    if not available_columns:
+        return pd.Series(np.nan, index=df.index)
+    
+    # Create a copy of the dataframe with only needed columns
+    df_scores = df[available_columns].copy()
+    
+    # Convert columns to numeric, coercing errors to NaN
+    for col in available_columns:
+        df_scores[col] = pd.to_numeric(df_scores[col], errors='coerce')
+    
+    # Normalize all scores to 0-100 range (5-point scale becomes 0, 25, 50, 75, 100)
+    for col in available_columns:
+        # Invert the scale (1 becomes 5, 2 becomes 4, etc.) since lower values mean better mental health
+        df_scores[col] = 6 - df_scores[col]
+        # Convert to 0-100 scale
+        df_scores[col] = (df_scores[col] - 1) * 25
+    
+    # Calculate average score (scale 0-100)
+    return df_scores.mean(axis=1)
+
+def calculate_social_media_impact_score(df):
+    """Calculate social media impact score based on usage patterns and behaviors."""
+    # Select relevant columns for social media impact
+    social_media_columns = [
+        '9. How often do you find yourself using Social media without a specific purpose?',
+        '10. How often do you get distracted by Social media when you are busy doing something?',
+        '11. Do you feel restless if you haven\'t used Social media in a while?'
+    ]
+    
+    # Check if all required columns exist
+    available_columns = [col for col in social_media_columns if col in df.columns]
+    
+    if not available_columns:
+        return pd.Series(np.nan, index=df.index)
+    
+    # Calculate social media impact score (higher means more negative impact)
+    sm_scores = df[available_columns].copy()
+    
+    # Convert columns to numeric, coercing errors to NaN
+    for col in available_columns:
+        sm_scores[col] = pd.to_numeric(sm_scores[col], errors='coerce')
+    
+    # Normalize to 0-100 range (5-point scale becomes 0, 25, 50, 75, 100)
+    for col in available_columns:
+        # Here we don't invert because higher values already indicate more negative impact
+        sm_scores[col] = (sm_scores[col] - 1) * 25
+    
+    return sm_scores.mean(axis=1)
+
+def create_user_clusters(df):
+    """Create user clusters based on mental health and social media patterns."""
+    # Select features for clustering
+    cluster_features = [
+        'Mental Health Score',
+        'Social Media Impact Score',
+        'Daily Usage (minutes)'
+    ]
+    
+    # Check if required columns exist
+    if not all(col in df.columns for col in cluster_features):
+        return df
+    
+    # Prepare data for clustering - ensure we drop rows with ANY missing values
+    cluster_data = df[cluster_features].copy().dropna()
+    
+    if len(cluster_data) < 10:  # Not enough data for meaningful clusters
+        return df
+    
+    # Normalize the data
+    scaler = MinMaxScaler()
+    cluster_data_scaled = scaler.fit_transform(cluster_data)
+    
+    # Determine optimal number of clusters using elbow method
+    inertia = []
+    k_range = range(2, min(6, len(cluster_data) // 10 + 1))
+    
+    for k in k_range:
+        kmeans = KMeans(n_clusters=k, random_state=42)
+        kmeans.fit(cluster_data_scaled)
+        inertia.append(kmeans.inertia_)
+    
+    # Find elbow point (simplified approach)
+    k = 3  # Default if elbow point detection fails
+    
+    # Apply K-means with selected k
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    
+    # Create a mapping back to original dataframe indices
+    idx_mapping = dict(zip(range(len(cluster_data)), cluster_data.index))
+    
+    # Fit and predict clusters
+    clusters = kmeans.fit_predict(cluster_data_scaled)
+    
+    # Create a Series with clusters mapped back to original indices
+    cluster_series = pd.Series(index=cluster_data.index, data=clusters)
+    
+    # Map cluster labels to interpretable categories
+    # Calculate cluster centers in original scale
+    centers = scaler.inverse_transform(kmeans.cluster_centers_)
+    
+    # Get means for each cluster
+    cluster_means = pd.DataFrame(centers, columns=cluster_features)
+    
+    # Rank clusters by mental health score (0=worst, k-1=best)
+    # Handle potential NaN values
+    if cluster_means['Mental Health Score'].isna().any():
+        # If there are NaN values, assign default ranks
+        mental_health_rank = pd.Series(range(k))
+    else:
+        mental_health_rank = cluster_means['Mental Health Score'].rank(ascending=True) - 1
+    
+    # Create cluster names based on mental health rank (with safety checks)
+    cluster_names = {
+        0: "High Risk",      # Worst mental health
+        1: "Moderate Risk",  # Middle
+        2: "Low Risk"        # Best mental health
+    }
+    
+    # Map numeric clusters to named clusters based on rank
+    rank_to_name = {}
+    for i, rank in enumerate(mental_health_rank):
+        # Make sure rank is a valid integer
+        try:
+            int_rank = int(rank)
+            # Make sure int_rank is within bounds (0, 1, or 2)
+            if int_rank < 0 or int_rank >= k:
+                int_rank = i % k  # Fallback to modulo if out of bounds
+            rank_to_name[i] = cluster_names[int_rank]
+        except (ValueError, TypeError):
+            # Fallback for invalid ranks
+            rank_to_name[i] = cluster_names[i % k]
+    
+    # Apply mapping to create user segment column
+    df = df.copy()  # Create a copy to avoid SettingWithCopyWarning
+    df.loc[cluster_series.index, 'User Segment'] = cluster_series.map(rank_to_name)
+    
+    return df
 
 @st.cache_data(ttl=3600)  # Cache data for 1 hour
 def load_and_process_data():
@@ -136,749 +405,1363 @@ def load_and_process_data():
     try:
         df = pd.read_csv(CSV_FILE_PATH)
         
-        # Convert Age to numeric if it's stored as string but contains numbers
-        try:
-            df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
-        except:
-            pass  # Keep as is if conversion fails
+        # Skip completely empty rows
+        df = df.dropna(how='all')
         
-        # Create age groups if Age is numeric
-        if pd.api.types.is_numeric_dtype(df['Age']):
-            bins = [0, 18, 25, 35, 50, 100]
-            labels = ['Under 18', '18-24', '25-34', '35-49', '50+']
-            df['Age Group'] = pd.cut(df['Age'], bins=bins, labels=labels)
+        # Clean up yes/no columns
+        for col in df.columns:
+            if 'Do you' in col or 'affiliated' in col:
+                if df[col].dtype == 'object':  # Only process string columns
+                    df[col] = df[col].str.lower()
+                    df[col] = df[col].apply(lambda x: 'Yes' if isinstance(x, str) and ('yes' in x.lower() or 'y' in x.lower()) else 'No' if isinstance(x, str) else x)
         
-        # Rename columns to be more readable
-        df.columns = [col.replace('_', ' ').title() for col in df.columns]
+        # Convert age to numeric
+        age_col = '1. What is your age?'
+        if age_col in df.columns:
+            df[age_col] = pd.to_numeric(df[age_col], errors='coerce')
+            
+            # Create age groups
+            age_bins = [0, 18, 25, 35, 45, 100]
+            age_labels = ['Under 18', '18-24', '25-34', '35-44', '45+']
+            df['Age Group'] = pd.cut(df[age_col], bins=age_bins, labels=age_labels)
         
-        # Restore key columns with their original naming for code compatibility
-        col_mapping = {
-            'User Id': 'User_ID',
-            'Daily Usage Time (Minutes)': 'Daily_Usage_Time (minutes)',
-            'Posts Per Day': 'Posts_Per_Day',
-            'Likes Received Per Day': 'Likes_Received_Per_Day',
-            'Comments Received Per Day': 'Comments_Received_Per_Day',
-            'Messages Sent Per Day': 'Messages_Sent_Per_Day',
-            'Dominant Emotion': 'Dominant_Emotion'
-        }
+        # Process social media usage time
+        time_col = '8. What is the average time you spend on social media every day?'
+        if time_col in df.columns:
+            # Apply conversion and store in a new column
+            df['Daily Usage (minutes)'] = df[time_col].apply(convert_time_to_minutes)
+            
+            # Create usage categories
+            usage_bins = [0, 60, 120, 180, 240, 1000]
+            usage_labels = ['< 1 hour', '1-2 hours', '2-3 hours', '3-4 hours', '4+ hours']
+            df['Usage Category'] = pd.cut(df['Daily Usage (minutes)'], bins=usage_bins, labels=usage_labels)
         
-        df = df.rename(columns={v: k for k, v in col_mapping.items()})
+        # Calculate mental health score
+        df['Mental Health Score'] = calculate_mental_health_score(df)
         
-        # Create engagement metrics
-        df['Engagement Ratio'] = (df['Likes Received Per Day'] + df['Comments Received Per Day']) / (df['Posts Per Day'] + 0.001)
+        # Calculate social media impact score
+        df['Social Media Impact Score'] = calculate_social_media_impact_score(df)
         
-        # Categorize emotions (assumption - modify as needed)
-        positive_emotions = ['Happy', 'Happiness', 'Excited', 'Content', 'Calm', 'Relaxed', 'Joy', 'Gratitude']
-        negative_emotions = ['Sad', 'Sadness', 'Anxious', 'Anxiety', 'Anger', 'Angry', 'Depressed', 'Depression', 'Stressed', 'Stress', 'Lonely', 'Loneliness', 'Frustrated', 'Frustration']
-        neutral_emotions = ['Neutral', 'Boredom', 'Bored']
+        # Create additional derived metrics
+        if 'Mental Health Score' in df.columns and 'Social Media Impact Score' in df.columns:
+            # Calculate resilience score (high mental health despite high social media impact)
+            df['Resilience Score'] = df['Mental Health Score'] / (df['Social Media Impact Score'] + 1)  # +1 to avoid division by zero
+            df['Resilience Score'] = df['Resilience Score'] * 20  # Scale to approximately 0-100
         
-        # Create emotion category column
-        df['Emotion Category'] = 'Other'
-        df.loc[df['Dominant Emotion'].str.lower().isin([e.lower() for e in positive_emotions]), 'Emotion Category'] = 'Positive'
-        df.loc[df['Dominant Emotion'].str.lower().isin([e.lower() for e in negative_emotions]), 'Emotion Category'] = 'Negative'
-        df.loc[df['Dominant Emotion'].str.lower().isin([e.lower() for e in neutral_emotions]), 'Emotion Category'] = 'Neutral'
+        # Save original column names for debugging
+        original_columns = df.columns.tolist()
         
-        # Create usage time categories
-        usage_bins = [0, 30, 60, 120, 240, 1000]
-        usage_labels = ['< 30 min', '30-60 min', '1-2 hours', '2-4 hours', '4+ hours']
-        df['Usage Category'] = pd.cut(df['Daily Usage Time (Minutes)'], bins=usage_bins, labels=usage_labels)
+        # Clean and normalize column names for display
+        display_columns = {}
+        for col in df.columns:
+            if col not in ['Mental Health Score', 'Social Media Impact Score', 'Resilience Score', 'Daily Usage (minutes)', 'Usage Category', 'Age Group', 'User Segment']:
+                display_columns[col] = clean_column_name(col)
         
-        # Create mental health score (inverse for negative emotions)
-        # Higher score = better mental health
-        df['Mental Health Score'] = 50  # Base score
+        # Rename columns to cleaned names
+        df = df.rename(columns=display_columns)
         
-        # Modify score based on emotion category
-        df.loc[df['Emotion Category'] == 'Positive', 'Mental Health Score'] += 25
-        df.loc[df['Emotion Category'] == 'Negative', 'Mental Health Score'] -= 25
+        # Add debug info about column renaming
+        if st.session_state.get('debug_columns', False):
+            st.write("Original columns:", original_columns)
+            st.write("After renaming:", df.columns.tolist())
+            st.write("Column mapping:", display_columns)
         
-        # Modify score based on usage time (heavy usage associated with lower scores)
-        # Adjust these weights based on your data's actual correlation patterns
-        usage_weights = {'< 30 min': 10, '30-60 min': 5, '1-2 hours': 0, 
-                        '2-4 hours': -5, '4+ hours': -15}
-        
-        for category, weight in usage_weights.items():
-            df.loc[df['Usage Category'] == category, 'Mental Health Score'] += weight
-        
-        # Ensure score stays in 0-100 range
-        df['Mental Health Score'] = df['Mental Health Score'].clip(0, 100)
+        # Create user clusters/segments using cleaned data
+        df = create_user_clusters(df)
         
         return df
     except Exception as e:
         st.error(f"Error loading data: {e}")
         return None
 
-def calculate_mental_health_score(screen_time, base_emotion="Neutral"):
-    """Calculate predicted mental health score based on screen time."""
-    # Load data to get average distributions
+def predict_mental_health(daily_usage, distraction_level, comparison_frequency, validation_seeking):
+    """
+    Predict mental health score based on user inputs.
+    
+    Parameters:
+    - daily_usage: Minutes spent on social media daily
+    - distraction_level: Level of distraction (1-5)
+    - comparison_frequency: Frequency of social comparison (1-5)
+    - validation_seeking: Frequency of seeking validation (1-5)
+    
+    Returns:
+    - Predicted mental health score (0-100)
+    """
+    # Load data to get baseline patterns
     df = load_and_process_data()
     
-    if df is None:
-        return 50  # Return default score if data can't be loaded
+    if df is None or len(df) == 0:
+        return 50  # Default score if data isn't available
     
-    # Determine usage category
-    if screen_time < 30:
-        usage_cat = '< 30 min'
-    elif screen_time < 60:
-        usage_cat = '30-60 min'
-    elif screen_time < 120:
-        usage_cat = '1-2 hours'
-    elif screen_time < 240:
-        usage_cat = '2-4 hours'
-    else:
-        usage_cat = '4+ hours'
+    # Calculate base score using regression-like formula derived from the data
+    # These coefficients would ideally come from a trained model
+    usage_impact = -0.04 * daily_usage  # More usage tends to lower mental health
+    distraction_impact = -5 * distraction_level  # More distraction lowers mental health
+    comparison_impact = -5 * comparison_frequency  # More comparison lowers mental health
+    validation_impact = -5 * validation_seeking  # More validation seeking lowers mental health
     
-    # Start with base score
-    score = 50
-    
-    # Adjust score based on usage category
-    usage_weights = {'< 30 min': 10, '30-60 min': 5, '1-2 hours': 0, 
-                    '2-4 hours': -5, '4+ hours': -15}
-    score += usage_weights.get(usage_cat, 0)
-    
-    # Get the dominant emotion categories for this usage level
-    if len(df) > 0:
-        filtered_df = df[df['Usage Category'] == usage_cat]
-        if len(filtered_df) > 0:
-            emotion_counts = filtered_df['Emotion Category'].value_counts(normalize=True)
-            
-            # Calculate probability-weighted score adjustment
-            emotion_weights = {'Positive': 25, 'Neutral': 0, 'Negative': -25, 'Other': 0}
-            for emotion, probability in emotion_counts.items():
-                score += emotion_weights.get(emotion, 0) * probability
+    # Calculate base score (centered around 60 as moderate health)
+    base_score = 80 + usage_impact + distraction_impact + comparison_impact + validation_impact
     
     # Ensure score stays in 0-100 range
-    return max(0, min(100, score))
-
-def get_mental_health_category(score):
-    """Convert mental health score to category."""
-    if score >= 80:
-        return "Excellent", theme["positive_color"]
-    elif score >= 60:
-        return "Good", theme["positive_color"]
-    elif score >= 40:
-        return "Average", theme["neutral_color"]
-    elif score >= 20:
-        return "Concerning", theme["negative_color"]
-    else:
-        return "Poor", theme["negative_color"]
+    return max(0, min(100, base_score))
 
 def show_dashboard():
-    st.markdown("<h1 class='main-header'>📱 Social Media & Mental Health Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 class='main-header'>🧠 Social Media & Mental Health Analysis</h1>", unsafe_allow_html=True)
+    
+    # Initialize debugging flag in session state
+    if 'debug_columns' not in st.session_state:
+        st.session_state.debug_columns = False
+    
+    # Add debug mode toggle
+    with st.sidebar:
+        st.session_state.debug_columns = st.checkbox("Enable Column Debug Mode", value=st.session_state.debug_columns)
     
     # Load data
     df = load_and_process_data()
     
-    if df is None:
+    if df is None or len(df) == 0:
         st.error(f"Could not load data from {CSV_FILE_PATH}. Please check the file path and format.")
         return
     
+    # Add debug information for available columns
+    if st.session_state.debug_columns:
+        with st.expander("Debug: Available Columns"):
+            st.write("All columns in the processed DataFrame:")
+            st.write(df.columns.tolist())
+    
+    # Add debug information for time column
+    time_col = 'What is the average time you spend on social media every day'  # Cleaned version
+    if time_col in df.columns:
+        with st.expander("Debug Time Data (Click to expand)"):
+            st.write("### Sample of Time Values and Conversions")
+            # Get a sample of time values and their conversions
+            sample_data = df[[time_col, 'Daily Usage (minutes)']].dropna().sample(min(10, len(df))).reset_index(drop=True)
+            st.dataframe(sample_data)
+            
+            st.write("### Distribution of Converted Values")
+            value_counts = df['Daily Usage (minutes)'].value_counts().sort_index().reset_index()
+            value_counts.columns = ['Minutes', 'Count']
+            st.dataframe(value_counts)
+    
     # Display file info
-    st.info(f"Analyzing data from: **{CSV_FILE_PATH}** • {len(df)} users analyzed")
+    st.info(f"Analyzing data from: **{CSV_FILE_PATH}** • {len(df)} participants analyzed")
     
     # Dashboard tabs with improved styling
-    tabs = st.tabs(["📊 Overview", "😊 Emotional Analysis", "🔄 Usage Correlations", "🔍 Advanced Insights", "🧠 Mental Health Predictor"])
+    tabs = st.tabs([
+        "📊 Overview", 
+        "💭 Mental Health Indicators", 
+        "📱 Social Media Usage", 
+        "🔄 Correlation Analysis",
+        "👥 User Segments",
+        "🔮 Mental Health Predictor"
+    ])
     
     with tabs[0]:
         show_overview(df)
     
     with tabs[1]:
-        show_emotional_analysis(df)
+        show_mental_health_analysis(df)
     
     with tabs[2]:
-        show_correlations(df)
+        show_social_media_analysis(df)
     
     with tabs[3]:
-        show_advanced_insights(df)
+        show_correlation_analysis(df)
     
     with tabs[4]:
+        show_user_segments(df)
+    
+    with tabs[5]:
         show_mental_health_predictor(df)
     
     # Footer
     st.markdown("---")
-    st.markdown("AuraTrack: Social Media Mental Health Analysis • Dashboard v1.1", help="Developed for analyzing social media usage and mental health correlations")
+    st.markdown("Social Media & Mental Health Dashboard • Analysis Version 2.0", help="Developed for analyzing social media usage and mental health correlations")
 
 def show_overview(df):
     st.markdown("<h2 class='sub-header'>Data Overview</h2>", unsafe_allow_html=True)
     
-    # Key metrics in a row
+    # Calculate key metrics
+    total_participants = len(df)
+    
+    # Social media users count - use cleaned column name
+    sm_users_col = 'Do you use social media'  # Cleaned version without prefix or question mark
+    sm_users = df[sm_users_col].str.lower().str.contains('yes').sum() if sm_users_col in df.columns else "N/A"
+    
+    # Average mental health score
+    avg_mental_health = df['Mental Health Score'].mean() if 'Mental Health Score' in df.columns else "N/A"
+    
+    # Average social media usage
+    avg_usage = df['Daily Usage (minutes)'].mean() if 'Daily Usage (minutes)' in df.columns else "N/A"
+    
+    # Display key metrics in a row
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-value'>{len(df)}</div>", unsafe_allow_html=True)
-        st.markdown("<div class='metric-label'>Total Users</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-value'>{total_participants}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='metric-label'>Total Participants</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
     
     with col2:
-        avg_usage = df['Daily Usage Time (Minutes)'].mean()
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-value'>{avg_usage:.1f}</div>", unsafe_allow_html=True)
-        st.markdown("<div class='metric-label'>Avg. Daily Usage (min)</div>", unsafe_allow_html=True)
+        sm_percentage = (sm_users / total_participants * 100) if isinstance(sm_users, (int, float)) else "N/A"
+        display_val = f"{sm_percentage:.1f}%" if isinstance(sm_percentage, (int, float)) else sm_percentage
+        st.markdown(f"<div class='metric-value'>{display_val}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='metric-label'>Social Media Users</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
     
     with col3:
-        most_common_platform = df['Platform'].value_counts().index[0]
-        platform_pct = (df['Platform'].value_counts()[0] / len(df) * 100)
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-value'>{most_common_platform}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-label'>Top Platform ({platform_pct:.1f}%)</div>", unsafe_allow_html=True)
+        display_val = f"{avg_mental_health:.1f}" if isinstance(avg_mental_health, (int, float)) else avg_mental_health
+        st.markdown(f"<div class='metric-value'>{display_val}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='metric-label'>Avg. Mental Health Score</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
     
     with col4:
-        most_common_emotion = df['Dominant Emotion'].value_counts().index[0]
-        emotion_pct = (df['Dominant Emotion'].value_counts()[0] / len(df) * 100)
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-value'>{most_common_emotion}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-label'>Top Emotion ({emotion_pct:.1f}%)</div>", unsafe_allow_html=True)
+        display_val = f"{avg_usage:.0f} min" if isinstance(avg_usage, (int, float)) else avg_usage
+        st.markdown(f"<div class='metric-value'>{display_val}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='metric-label'>Avg. Daily Social Media Usage</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
     
-    # Data summary with expander
-    with st.expander("View Data Preview"):
-        st.write("### Raw Data Sample")
+    # Demographics
+    st.markdown("<h3>Demographics</h3>", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Gender distribution - use cleaned column name
+        gender_col = 'Gender'  # Cleaned version without prefix
+        if gender_col in df.columns:
+            gender_counts = df[gender_col].value_counts().reset_index()
+            gender_counts.columns = ['Gender', 'Count']
+            
+            fig = px.pie(
+                gender_counts, 
+                values='Count', 
+                names='Gender', 
+                title='Participants by Gender',
+                color_discrete_sequence=theme["chart_colors"]
+            )
+            fig.update_traces(textposition='inside', textinfo='percent+label')
+            fig.update_layout(height=350)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.write(f"Gender data not available. Available columns: {', '.join(df.columns[:5])}...")
+    
+    with col2:
+        # Age distribution
+        if 'Age Group' in df.columns:
+            age_counts = df['Age Group'].value_counts().reset_index()
+            age_counts.columns = ['Age Group', 'Count']
+            
+            # Sort by age group
+            age_order = ['Under 18', '18-24', '25-34', '35-44', '45+']
+            age_counts['Age Group'] = pd.Categorical(age_counts['Age Group'], categories=age_order, ordered=True)
+            age_counts = age_counts.sort_values('Age Group')
+            
+            fig = px.bar(
+                age_counts, 
+                x='Age Group', 
+                y='Count',
+                title='Participants by Age Group',
+                color='Count',
+                color_continuous_scale='Viridis'
+            )
+            fig.update_layout(height=350)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.write("Age group data not available.")
+    
+    # Relationship and occupation status
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Relationship status - use cleaned column name
+        relationship_col = 'Relationship status'  # Cleaned version without prefix
+        if relationship_col in df.columns:
+            relationship_counts = df[relationship_col].value_counts().reset_index()
+            relationship_counts.columns = ['Relationship Status', 'Count']
+            
+            fig = px.pie(
+                relationship_counts,
+                values='Count',
+                names='Relationship Status',
+                title='Relationship Status Distribution',
+                color_discrete_sequence=theme["chart_colors"]
+            )
+            fig.update_traces(textposition='inside', textinfo='percent+label')
+            fig.update_layout(height=350)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.write(f"Relationship status data not available. Looking for column: '{relationship_col}'")
+            # Debug column names
+            with st.expander("Debug column names"):
+                st.write("All available columns:")
+                st.write(df.columns.tolist())
+    
+    with col2:
+        # Occupation status - use cleaned column name
+        occupation_col = 'Occupation status'  # Cleaned version without prefix
+        if occupation_col in df.columns:
+            occupation_counts = df[occupation_col].value_counts().reset_index()
+            occupation_counts.columns = ['Occupation Status', 'Count']
+            
+            fig = px.pie(
+                occupation_counts,
+                values='Count',
+                names='Occupation Status',
+                title='Occupation Status Distribution',
+                color_discrete_sequence=theme["chart_colors"]
+            )
+            fig.update_traces(textposition='inside', textinfo='percent+label')
+            fig.update_layout(height=350)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.write(f"Occupation status data not available. Looking for column: '{occupation_col}'")
+    
+    # Social Media Platform Usage - use cleaned column name
+    platform_col = 'What social media platforms do you commonly use'  # Cleaned version without prefix or question mark
+    if platform_col in df.columns:
+        st.markdown("<h3>Social Media Platform Usage</h3>", unsafe_allow_html=True)
+        
+        # Process platform data (multiple selections per user)
+        platforms = []
+        for response in df[platform_col].dropna():
+            # Split platforms and clean
+            user_platforms = [p.strip() for p in str(response).split(',')]
+            platforms.extend(user_platforms)
+        
+        # Count platform mentions
+        platform_counts = pd.Series(platforms).value_counts().reset_index()
+        platform_counts.columns = ['Platform', 'Count']
+        
+        # Filter out empty or irrelevant entries
+        platform_counts = platform_counts[platform_counts['Platform'].str.len() > 1]
+        
+        # Take top 10 platforms
+        platform_counts = platform_counts.head(10)
+        
+        fig = px.bar(
+            platform_counts,
+            x='Count',
+            y='Platform',
+            orientation='h',
+            title='Most Popular Social Media Platforms',
+            color='Count',
+            color_continuous_scale='Viridis'
+        )
+        fig.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Data preview in expander
+    with st.expander("View Data Sample"):
         st.dataframe(df.head())
-        
-        st.write("### Basic Statistics")
-        numeric_df = df.select_dtypes(include=['float64', 'int64'])
-        st.dataframe(numeric_df.describe())
-    
-    # Distribution of users
-    st.markdown("<h3>User Demographics</h3>", unsafe_allow_html=True)
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        # Platform distribution
-        platforms_count = df['Platform'].value_counts().reset_index()
-        platforms_count.columns = ['Platform', 'Count']
-        fig = px.pie(platforms_count, values='Count', names='Platform', 
-                     title='Users by Platform',
-                     color_discrete_sequence=theme["chart_colors"])
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        # Gender distribution
-        gender_count = df['Gender'].value_counts().reset_index()
-        gender_count.columns = ['Gender', 'Count']
-        fig = px.pie(gender_count, values='Count', names='Gender', 
-                     title='Users by Gender',
-                     color_discrete_sequence=theme["chart_colors"])
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Age distribution if available
-    if 'Age Group' in df.columns:
-        st.markdown("<h3>Age Distribution</h3>", unsafe_allow_html=True)
-        age_count = df['Age Group'].value_counts().reset_index()
-        age_count.columns = ['Age Group', 'Count']
-        
-        fig = px.bar(age_count, x='Age Group', y='Count', 
-                    title='Users by Age Group',
-                    color='Count',
-                    color_continuous_scale='Viridis')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Usage statistics
-    st.markdown("<h3>Usage Patterns</h3>", unsafe_allow_html=True)
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        # Daily usage distribution
-        fig = px.histogram(df, x='Daily Usage Time (Minutes)', 
-                           nbins=20,
-                           title='Distribution of Daily Usage Time',
-                           color_discrete_sequence=[theme["chart_colors"][0]])
-        fig.update_layout(bargap=0.1, height=400)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        # Posts per day distribution
-        fig = px.histogram(df, x='Posts Per Day', 
-                           nbins=15,
-                           title='Distribution of Posts Per Day',
-                           color_discrete_sequence=[theme["chart_colors"][1]])
-        fig.update_layout(bargap=0.1, height=400)
-        st.plotly_chart(fig, use_container_width=True)
 
-def show_emotional_analysis(df):
-    st.markdown("<h2 class='sub-header'>Emotional Analysis</h2>", unsafe_allow_html=True)
+def show_mental_health_analysis(df):
+    st.markdown("<h2 class='sub-header'>Mental Health Indicators</h2>", unsafe_allow_html=True)
     
-    # Distribution of emotions
-    emotion_count = df['Dominant Emotion'].value_counts().reset_index()
-    emotion_count.columns = ['Emotion', 'Count']
+    # Filter to only show participants who use social media
+    sm_users_col = 'Do you use social media'  # Cleaned version without prefix or question mark
+    if sm_users_col in df.columns:
+        df_sm = df[df[sm_users_col].str.lower().str.contains('yes', na=False)]
+    else:
+        df_sm = df
     
-    col1, col2 = st.columns([3, 2])
-    
-    with col1:
-        fig = px.bar(emotion_count, x='Emotion', y='Count', 
-                    title='Distribution of Dominant Emotions',
-                    color='Emotion',
-                    color_discrete_sequence=theme["chart_colors"])
-        fig.update_layout(height=450)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-        st.write("### Key Insights")
+    # Mental Health Score Distribution
+    if 'Mental Health Score' in df_sm.columns:
+        st.subheader('Mental Health Score Distribution')
         
-        # Find most common emotion
-        most_common = emotion_count.iloc[0]['Emotion']
-        st.write(f"• Most common emotion: **{most_common}**")
+        # Create mental health categories
+        score_bins = [0, 30, 45, 60, 75, 100]
+        score_labels = ['Very Poor', 'Poor', 'Moderate', 'Good', 'Excellent']
         
-        # Calculate percentage of emotion categories
-        if 'Emotion Category' in df.columns:
-            emotion_cats = df['Emotion Category'].value_counts(normalize=True) * 100
-            for cat, pct in emotion_cats.items():
-                st.write(f"• **{cat}** emotions: **{pct:.1f}%** of users")
+        df_sm['Mental Health Category'] = pd.cut(df_sm['Mental Health Score'], bins=score_bins, labels=score_labels)
         
-        # Find average usage time for most common emotions
-        top_emotions = emotion_count.head(3)['Emotion'].tolist()
-        for emotion in top_emotions:
-            avg_time = df[df['Dominant Emotion'] == emotion]['Daily Usage Time (Minutes)'].mean()
-            st.write(f"• Users feeling **{emotion}** use social media **{avg_time:.1f} min/day** on average")
+        # Plot distribution
+        mh_category_counts = df_sm['Mental Health Category'].value_counts().reset_index()
+        mh_category_counts.columns = ['Category', 'Count']
         
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    # Emotions by platform
-    st.write("### Emotions by Platform")
-    
-    # Get top emotions and platforms for cleaner visualization
-    top_emotions = emotion_count.head(6)['Emotion'].tolist()
-    top_platforms = df['Platform'].value_counts().head(5).index.tolist()
-    
-    # Filter data for top emotions and platforms
-    filtered_df = df[df['Dominant Emotion'].isin(top_emotions) & df['Platform'].isin(top_platforms)]
-    
-    # Create emotion by platform heatmap
-    emotion_platform = pd.crosstab(filtered_df['Dominant Emotion'], filtered_df['Platform'])
-    emotion_platform_pct = emotion_platform.div(emotion_platform.sum(axis=0), axis=1) * 100
-    
-    fig = px.imshow(emotion_platform_pct, 
-                   labels=dict(x="Platform", y="Emotion", color="Percentage (%)"),
-                   text_auto='.1f',
-                   aspect="auto",
-                   color_continuous_scale='Blues')
-    fig.update_layout(height=450, 
-                     xaxis_title="Platform", 
-                     yaxis_title="Emotion",
-                     coloraxis_colorbar=dict(title="Percentage (%)"))
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Emotion categories by usage time
-    if 'Emotion Category' in df.columns and 'Usage Category' in df.columns:
-        st.write("### Emotion Categories by Usage Time")
-        
-        emotion_usage = pd.crosstab(df['Usage Category'], df['Emotion Category'])
-        emotion_usage_pct = emotion_usage.div(emotion_usage.sum(axis=1), axis=0) * 100
-        
-        # Create a mapping of emotion categories to colors
-        color_discrete_map = {
-            'Positive': theme["positive_color"], 
-            'Neutral': theme["neutral_color"], 
-            'Negative': theme["negative_color"], 
-            'Other': '#9E9E9E'
-        }
-        
-        fig = px.bar(emotion_usage_pct.reset_index().melt(id_vars='Usage Category', var_name='Emotion Category', value_name='Percentage'),
-                    x='Usage Category', 
-                    y='Percentage', 
-                    color='Emotion Category',
-                    title='Emotion Categories by Usage Time',
-                    barmode='stack',
-                    color_discrete_map=color_discrete_map)
-        
-        fig.update_layout(height=450,
-                         xaxis_title="Daily Usage Time",
-                         yaxis_title="Percentage (%)")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Key insights about emotion categories and usage time
-        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-        st.write("### Key Observations")
-        
-        # Find categories with highest usage time
-        high_usage_emotions = df.groupby('Emotion Category')['Daily Usage Time (Minutes)'].mean().sort_values(ascending=False)
-        
-        for i, (cat, time) in enumerate(high_usage_emotions.items()):
-            if i == 0:
-                st.write(f"• Users with **{cat}** emotions spend the **most time** on social media (**{time:.1f} min/day**)")
-            elif i == len(high_usage_emotions) - 1:
-                st.write(f"• Users with **{cat}** emotions spend the **least time** on social media (**{time:.1f} min/day**)")
-        
-        # Check if there's a pattern in high usage category
-        high_usage_df = df[df['Usage Category'] == '4+ hours']
-        if len(high_usage_df) > 0:
-            high_usage_top_emotion = high_usage_df['Dominant Emotion'].value_counts().index[0]
-            high_usage_pct = high_usage_df['Dominant Emotion'].value_counts().iloc[0] / len(high_usage_df) * 100
-            st.write(f"• Among heavy users (4+ hours), **{high_usage_pct:.1f}%** report feeling **{high_usage_top_emotion}**")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-
-def show_correlations(df):
-    st.markdown("<h2 class='sub-header'>Usage & Emotion Correlations</h2>", unsafe_allow_html=True)
-    
-    # Usage metrics by emotion
-    st.write("### Social Media Usage by Dominant Emotion")
-    
-    usage_metrics = ['Daily Usage Time (Minutes)', 'Posts Per Day', 
-                     'Likes Received Per Day', 'Comments Received Per Day', 
-                     'Messages Sent Per Day']
-    
-    # Use clean names for display
-    usage_metrics_display = [clean_field_name(metric) for metric in usage_metrics]
-    
-    # Create a mapping between display names and actual column names
-    metrics_map = dict(zip(usage_metrics_display, usage_metrics))
-    
-    selected_metric_display = st.selectbox("Select usage metric to analyze:", usage_metrics_display)
-    selected_metric = metrics_map[selected_metric_display]
-    
-    # Get top emotions for cleaner visualization
-    top_emotions = df['Dominant Emotion'].value_counts().head(6).index.tolist()
-    filtered_df = df[df['Dominant Emotion'].isin(top_emotions)]
-    
-    # Box plot of selected metric by emotion
-    fig = px.box(filtered_df, 
-                x='Dominant Emotion', 
-                y=selected_metric, 
-                color='Dominant Emotion',
-                title=f'{selected_metric_display} by Dominant Emotion',
-                color_discrete_sequence=theme["chart_colors"])
-    
-    fig.update_layout(height=500,
-                     xaxis_title="Emotion",
-                     yaxis_title=selected_metric_display,
-                     showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Calculate means for each emotion
-    emotion_means = filtered_df.groupby('Dominant Emotion')[selected_metric].mean().reset_index()
-    emotion_means = emotion_means.sort_values(selected_metric, ascending=False)
-    
-    col1, col2 = st.columns([3, 2])
-    
-    with col1:
-        # Bar chart of average metric by emotion
-        fig = px.bar(emotion_means, 
-                    x='Dominant Emotion', 
-                    y=selected_metric,
-                    color='Dominant Emotion',
-                    title=f'Average {selected_metric_display} by Emotion',
-                    color_discrete_sequence=theme["chart_colors"])
-        
-        fig.update_layout(height=400,
-                         xaxis_title="Emotion",
-                         yaxis_title=f"Average {selected_metric_display}",
-                         showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-        st.write("### Statistical Insights")
-        
-        # Calculate ANOVA to test if there are significant differences between emotions
-        try:
-            groups = [filtered_df[filtered_df['Dominant Emotion'] == emotion][selected_metric].dropna() 
-                     for emotion in filtered_df['Dominant Emotion'].unique() if len(filtered_df[filtered_df['Dominant Emotion'] == emotion]) > 0]
-            
-            if len(groups) > 1 and all(len(g) > 0 for g in groups):
-                f_val, p_val = stats.f_oneway(*groups)
-                
-                st.write(f"• ANOVA p-value: **{p_val:.4f}**")
-                if p_val < 0.05:
-                    st.write("• There is a **statistically significant difference** in this metric across different emotional states.")
-                else:
-                    st.write("• There is **no statistically significant difference** in this metric across different emotional states.")
-            else:
-                st.write("• Not enough data in each group for statistical testing.")
-        except Exception as e:
-            st.write(f"• Unable to perform statistical test: {e}")
-        
-        # Find the emotion with highest average
-        if not emotion_means.empty:
-            highest_emotion = emotion_means.iloc[0]['Dominant Emotion']
-            highest_value = emotion_means.iloc[0][selected_metric]
-            st.write(f"• **{highest_emotion}** has the highest average **{selected_metric_display.lower()}** ({highest_value:.2f}).")
-            
-            # Find the emotion with lowest average
-            lowest_emotion = emotion_means.iloc[-1]['Dominant Emotion']
-            lowest_value = emotion_means.iloc[-1][selected_metric]
-            st.write(f"• **{lowest_emotion}** has the lowest average **{selected_metric_display.lower()}** ({lowest_value:.2f}).")
-            
-            # Calculate percentage difference
-            pct_diff = (highest_value - lowest_value) / lowest_value * 100
-            st.write(f"• The difference between highest and lowest is **{pct_diff:.1f}%**.")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    # Correlation heatmap
-    st.write("### Correlation Matrix")
-    
-    # Select only numeric columns for correlation
-    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
-    
-    # Filter out ID columns and derived columns
-    numeric_cols = [col for col in numeric_cols if 'ID' not in col and 'Ratio' not in col and 'Score' not in col]
-    
-    # Create correlation matrix
-    corr_matrix = df[numeric_cols].corr().round(2)
-    
-    # Plot heatmap
-    fig = px.imshow(corr_matrix,
-                   text_auto='.2f',
-                   aspect="auto",
-                   color_continuous_scale='RdBu_r',
-                   color_continuous_midpoint=0)
-    
-    fig.update_layout(height=550,
-                     title="Correlation Matrix of Usage Metrics")
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Highlight strongest correlations
-    st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-    st.write("### Key Correlations")
-    
-    # Remove self-correlations and find top 3 strongest correlations
-    corr_data = corr_matrix.unstack()
-    corr_data = corr_data[corr_data < 1.0]  # Remove self-correlations
-    strongest_corrs = corr_data.abs().sort_values(ascending=False)[:3]
-    
-    for idx, corr_value in strongest_corrs.items():
-        var1, var2 = idx
-        direction = "positive" if corr_value > 0 else "negative"
-        strength = "strong" if abs(corr_value) > 0.7 else "moderate"
-        
-        var1_label = clean_field_name(var1)
-        var2_label = clean_field_name(var2)
-        
-        st.write(f"• **{var1_label}** and **{var2_label}** have a {strength} {direction} correlation (**{corr_value:.2f}**).")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-
-def show_advanced_insights(df):
-    st.markdown("<h2 class='sub-header'>Advanced Insights</h2>", unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.write("### Usage Time vs. Emotion Category")
-        
-        if 'Emotion Category' in df.columns:
-            # Create plot of average usage time by emotion category
-            emotion_cat_usage = df.groupby('Emotion Category')['Daily Usage Time (Minutes)'].mean().reset_index()
-            emotion_cat_usage = emotion_cat_usage.sort_values('Daily Usage Time (Minutes)', ascending=False)
-            
-            # Add count of users in each category
-            emotion_cat_count = df['Emotion Category'].value_counts().reset_index()
-            emotion_cat_count.columns = ['Emotion Category', 'Count']
-            
-            emotion_cat_usage = emotion_cat_usage.merge(emotion_cat_count, on='Emotion Category', how='left')
-            emotion_cat_usage['Label'] = emotion_cat_usage['Emotion Category'] + ' (' + emotion_cat_usage['Count'].astype(str) + ' users)'
-            
-            # Create a mapping of emotion categories to colors
-            color_discrete_map = {
-                'Positive': theme["positive_color"], 
-                'Neutral': theme["neutral_color"], 
-                'Negative': theme["negative_color"], 
-                'Other': '#9E9E9E'
-            }
-            
-            fig = px.bar(emotion_cat_usage, 
-                        x='Label', 
-                        y='Daily Usage Time (Minutes)',
-                        color='Emotion Category',
-                        title='Average Daily Usage Time by Emotion Category',
-                        color_discrete_map=color_discrete_map)
-            
-            fig.update_layout(height=400,
-                             xaxis_title="Emotion Category",
-                             yaxis_title="Avg. Daily Usage (minutes)")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            # Calculate average usage time by emotion
-            emotion_usage = df.groupby('Dominant Emotion')['Daily Usage Time (Minutes)'].mean().reset_index()
-            emotion_usage = emotion_usage.sort_values('Daily Usage Time (Minutes)', ascending=False)
-            
-            fig = px.bar(emotion_usage, 
-                        x='Dominant Emotion', 
-                        y='Daily Usage Time (Minutes)',
-                        color='Dominant Emotion',
-                        title='Average Daily Usage Time by Emotion',
-                        color_discrete_sequence=theme["chart_colors"])
-            
-            fig.update_layout(height=400,
-                             xaxis_title="Emotion",
-                             yaxis_title="Avg. Daily Usage (minutes)",
-                             showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Extract insights
-        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-        
-        # Find emotions that have highest/lowest usage time
-        highest_usage_emotion = df.groupby('Dominant Emotion')['Daily Usage Time (Minutes)'].mean().sort_values(ascending=False)
-        lowest_usage_emotion = df.groupby('Dominant Emotion')['Daily Usage Time (Minutes)'].mean().sort_values()
-        
-        st.write("### Usage Time Insights")
-        
-        if not highest_usage_emotion.empty and not lowest_usage_emotion.empty:
-            high_emotion = highest_usage_emotion.index[0]
-            high_time = highest_usage_emotion.iloc[0]
-            
-            low_emotion = lowest_usage_emotion.index[0]
-            low_time = lowest_usage_emotion.iloc[0]
-            
-            st.write(f"• Users feeling **{high_emotion}** spend the most time on social media (**{high_time:.1f} min/day**).")
-            st.write(f"• Users feeling **{low_emotion}** spend the least time (**{low_time:.1f} min/day**).")
-            
-            # Calculate percentage difference
-            pct_diff = (high_time - low_time) / low_time * 100
-            st.write(f"• The difference between highest and lowest usage time is **{pct_diff:.1f}%**.")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    with col2:
-        st.write("### Engagement vs. Emotion")
-        
-        if 'Engagement Ratio' in df.columns:
-            # Group by emotion and calculate average engagement ratio
-            engagement_by_emotion = df.groupby('Dominant Emotion')['Engagement Ratio'].mean().reset_index()
-            engagement_by_emotion = engagement_by_emotion.sort_values('Engagement Ratio', ascending=False)
-            
-            fig = px.bar(engagement_by_emotion,
-                        x='Dominant Emotion',
-                        y='Engagement Ratio',
-                        color='Dominant Emotion',
-                        title='Average Engagement Ratio by Emotion',
-                        color_discrete_sequence=theme["chart_colors"])
-            
-            fig.update_layout(height=400,
-                             xaxis_title="Emotion",
-                             yaxis_title="Avg. Engagement Ratio",
-                             showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Provide insights
-            st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-            st.write("### Engagement Insights")
-            
-            if not engagement_by_emotion.empty:
-                highest_engagement = engagement_by_emotion.iloc[0]['Dominant Emotion']
-                highest_value = engagement_by_emotion.iloc[0]['Engagement Ratio']
-                
-                lowest_engagement = engagement_by_emotion.iloc[-1]['Dominant Emotion']
-                lowest_value = engagement_by_emotion.iloc[-1]['Engagement Ratio']
-                
-                st.write(f"• **{highest_engagement}** users have the highest average engagement ratio (**{highest_value:.2f}**).")
-                st.write(f"• **{lowest_engagement}** users have the lowest average engagement ratio (**{lowest_value:.2f}**).")
-                
-                # Add interpretation
-                st.write("• Higher engagement ratio means users receive more interactions (likes/comments) per post.")
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            # If engagement ratio not available, show likes received by emotion
-            likes_by_emotion = df.groupby('Dominant Emotion')['Likes Received Per Day'].mean().reset_index()
-            likes_by_emotion = likes_by_emotion.sort_values('Likes Received Per Day', ascending=False)
-            
-            fig = px.bar(likes_by_emotion,
-                        x='Dominant Emotion',
-                        y='Likes Received Per Day',
-                        color='Dominant Emotion',
-                        title='Average Likes Received by Emotion',
-                        color_discrete_sequence=theme["chart_colors"])
-            
-            fig.update_layout(height=400,
-                             xaxis_title="Emotion",
-                             yaxis_title="Avg. Likes Received Per Day",
-                             showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-    
-    # Mental Health Score by Usage Time
-    if 'Mental Health Score' in df.columns:
-        st.write("### Mental Health Score by Usage Category")
-        
-        mh_score_by_usage = df.groupby('Usage Category')['Mental Health Score'].mean().reset_index()
-        
-        # Ensure the categories are in the correct order
-        usage_order = ['< 30 min', '30-60 min', '1-2 hours', '2-4 hours', '4+ hours']
-        mh_score_by_usage['Usage Category'] = pd.Categorical(
-            mh_score_by_usage['Usage Category'], 
-            categories=usage_order,
+        # Ensure proper ordering
+        mh_category_counts['Category'] = pd.Categorical(
+            mh_category_counts['Category'], 
+            categories=score_labels,
             ordered=True
         )
-        mh_score_by_usage = mh_score_by_usage.sort_values('Usage Category')
+        mh_category_counts = mh_category_counts.sort_values('Category')
         
-        # Create gradient color based on score
-        colors = [theme["positive_color"] if score > 60 else 
-                 theme["neutral_color"] if score > 40 else 
-                 theme["negative_color"] for score in mh_score_by_usage['Mental Health Score']]
+        # Create color mapping
+        color_map = {
+            'Very Poor': theme["negative_color"],
+            'Poor': '#F87171',  # Lighter red
+            'Moderate': theme["neutral_color"],
+            'Good': '#34D399',  # Lighter green
+            'Excellent': theme["positive_color"]
+        }
         
-        fig = px.bar(mh_score_by_usage,
-                    x='Usage Category',
-                    y='Mental Health Score',
-                    title='Average Mental Health Score by Usage Time',
-                    color='Mental Health Score',
-                    color_continuous_scale=[theme["negative_color"], theme["neutral_color"], theme["positive_color"]],
-                    range_color=[0, 100])
+        col1, col2 = st.columns([2, 1])
         
-        fig.update_layout(height=450,
-                         xaxis_title="Daily Usage Time",
-                         yaxis_title="Avg. Mental Health Score")
+        with col1:
+            # Bar chart of mental health categories
+            fig = px.bar(
+                mh_category_counts,
+                x='Category',
+                y='Count',
+                title='Mental Health Score Categories',
+                color='Category',
+                color_discrete_map=color_map
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Statistics and insights
+            st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+            st.write("### Mental Health Insights")
+            
+            # Overall statistics
+            avg_score = df_sm['Mental Health Score'].mean()
+            median_score = df_sm['Mental Health Score'].median()
+            
+            st.write(f"• Average score: **{avg_score:.1f}**")
+            st.write(f"• Median score: **{median_score:.1f}**")
+            
+            # Percentage in each category
+            total_count = len(df_sm)
+            for category in score_labels:
+                count = len(df_sm[df_sm['Mental Health Category'] == category])
+                percentage = (count / total_count) * 100
+                
+                # Choose color based on category
+                if category in ['Excellent', 'Good']:
+                    color = theme["positive_color"]
+                elif category == 'Moderate':
+                    color = theme["neutral_color"]
+                else:
+                    color = theme["negative_color"]
+                
+                st.write(f"• **{category}**: {percentage:.1f}% " + 
+                         f"<span class='score-badge' style='background-color:{color};'>", unsafe_allow_html=True)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Mental Health Indicator Details
+    st.subheader('Mental Health Indicators Analysis')
+    
+    # Select mental health indicator columns
+    mental_health_cols = [
+        'How easily distracted are you?',
+        'How much are you bothered by worries?',
+        'Do you find it difficult to concentrate on things?',
+        'How often do you compare yourself to other successful people through the use of social media?',
+        'How do you feel about these comparisons, generally speaking?',
+        'How often do you look to seek validation from features of social media?',
+        'How often do you feel depressed or down?',
+        'How frequently does your interest in daily activities fluctuate?',
+        'How often do you face issues regarding sleep?'
+    ]
+    
+    # Find available columns in the data
+    available_mh_cols = [col for col in df_sm.columns if any(mh_col in col for mh_col in mental_health_cols)]
+    
+    if available_mh_cols:
+        # Let user select an indicator to view
+        selected_indicator = st.selectbox(
+            "Select a mental health indicator to analyze:",
+            options=available_mh_cols
+        )
+        
+        # Analysis of selected indicator
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # Distribution of responses
+            fig = px.histogram(
+                df_sm,
+                x=selected_indicator,
+                title=f'Distribution of {clean_column_name(selected_indicator)} Responses',
+                color_discrete_sequence=[theme["chart_colors"][0]]
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Statistics and insights
+            st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+            st.write(f"### {clean_column_name(selected_indicator)} Insights")
+            
+            # Calculate statistics
+            avg_value = df_sm[selected_indicator].mean()
+            median_value = df_sm[selected_indicator].median()
+            most_common = df_sm[selected_indicator].mode()[0]
+            
+            st.write(f"• Average score: **{avg_value:.1f}**")
+            st.write(f"• Median score: **{median_value:.1f}**")
+            st.write(f"• Most common response: **{most_common}**")
+            
+            # Calculate percentage of concerning responses (4-5 on scale)
+            concerning = len(df_sm[df_sm[selected_indicator] >= 4])
+            percentage = (concerning / len(df_sm)) * 100
+            st.write(f"• **{percentage:.1f}%** of participants reported high levels (4-5)")
+            
+            # Add interpretation based on the indicator
+            if "distracted" in selected_indicator.lower():
+                st.write("• Higher scores indicate **greater difficulty maintaining focus** and may correlate with excessive social media usage")
+            elif "worries" in selected_indicator.lower():
+                st.write("• Higher scores suggest **elevated anxiety levels** which may be exacerbated by social media content")
+            elif "concentrate" in selected_indicator.lower():
+                st.write("• Higher scores indicate **potential attention issues** that might be influenced by frequent social media interruptions")
+            elif "compare" in selected_indicator.lower():
+                st.write("• Higher scores reflect **more frequent social comparison** which can negatively impact self-esteem")
+            elif "validation" in selected_indicator.lower():
+                st.write("• Higher scores suggest **greater dependence on external validation** through social media")
+            elif "depressed" in selected_indicator.lower():
+                st.write("• Higher scores indicate **more frequent feelings of depression** which may be related to social media usage patterns")
+            elif "sleep" in selected_indicator.lower():
+                st.write("• Higher scores reflect **more frequent sleep disturbances** which could be connected to evening social media use")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Mental Health by Demographics
+    st.subheader('Mental Health Analysis by Demographics')
+    
+    # Check if we have necessary data
+    if 'Mental Health Score' in df_sm.columns:
+        # Select demographic to analyze
+        demographic_options = [col for col in ['Age Group', 'Gender', 'Relationship Status', 'Occupation Status'] if col in df_sm.columns]
+        
+        if demographic_options:
+            selected_demographic = st.selectbox(
+                "Select demographic factor to analyze:",
+                options=demographic_options
+            )
+            
+            # Create analysis
+            demographic_analysis = df_sm.groupby(selected_demographic)['Mental Health Score'].agg(['mean', 'median', 'count']).reset_index()
+            demographic_analysis.columns = [selected_demographic, 'Average Score', 'Median Score', 'Count']
+            
+            # Sort by average score
+            demographic_analysis = demographic_analysis.sort_values('Average Score')
+            
+            fig = px.bar(
+                demographic_analysis,
+                x=selected_demographic,
+                y='Average Score',
+                title=f'Mental Health Score by {selected_demographic}',
+                color='Average Score',
+                color_continuous_scale=theme["gradient_colors"],
+                text='Count'
+            )
+            fig.update_layout(height=400)
+            fig.update_traces(texttemplate='%{text} participants', textposition='outside')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Insights about the demographic analysis
+            st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+            st.write(f"### Mental Health by {selected_demographic} Insights")
+            
+            # Find highest and lowest groups
+            highest_group = demographic_analysis.iloc[-1]
+            lowest_group = demographic_analysis.iloc[0]
+            
+            st.write(f"• **{highest_group[selected_demographic]}** has the highest average mental health score (**{highest_group['Average Score']:.1f}**)")
+            st.write(f"• **{lowest_group[selected_demographic]}** has the lowest average mental health score (**{lowest_group['Average Score']:.1f}**)")
+            
+            # Calculate difference
+            diff_pct = ((highest_group['Average Score'] - lowest_group['Average Score']) / lowest_group['Average Score']) * 100
+            st.write(f"• The difference between highest and lowest groups is **{diff_pct:.1f}%**")
+            
+            # Run statistical test if there are enough groups
+            if len(demographic_analysis) > 1:
+                groups = []
+                for group in demographic_analysis[selected_demographic]:
+                    group_data = df_sm[df_sm[selected_demographic] == group]['Mental Health Score'].dropna()
+                    if len(group_data) > 0:
+                        groups.append(group_data)
+                
+                if len(groups) > 1 and all(len(g) > 5 for g in groups):
+                    try:
+                        f_val, p_val = stats.f_oneway(*groups)
+                        st.write(f"• Statistical significance: p-value = **{p_val:.4f}**")
+                        
+                        if p_val < 0.05:
+                            st.write("• The differences between groups are **statistically significant** (p < 0.05)")
+                        else:
+                            st.write("• The differences between groups are **not statistically significant** (p ≥ 0.05)")
+                    except:
+                        st.write("• Unable to perform statistical test with current data")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+
+def show_social_media_analysis(df):
+    st.markdown("<h2 class='sub-header'>Social Media Usage Analysis</h2>", unsafe_allow_html=True)
+    
+    # Filter to only show participants who use social media
+    sm_users_col = 'Do you use social media'  # Cleaned version without prefix or question mark
+    if sm_users_col in df.columns:
+        df_sm = df[df[sm_users_col].str.lower().str.contains('yes', na=False)]
+    else:
+        df_sm = df
+    
+    # Daily Usage Analysis
+    if 'Daily Usage (minutes)' in df_sm.columns:
+        st.subheader('Daily Social Media Usage')
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # Create usage histogram
+            fig = px.histogram(
+                df_sm,
+                x='Daily Usage (minutes)',
+                nbins=20,
+                title='Distribution of Daily Social Media Usage',
+                color_discrete_sequence=[theme["chart_colors"][0]]
+            )
+            
+            # Add average line
+            avg_usage = df_sm['Daily Usage (minutes)'].mean()
+            fig.add_vline(
+                x=avg_usage,
+                line_dash="dash",
+                line_color=theme["border_color"],
+                annotation_text=f"Average: {avg_usage:.0f} min",
+                annotation_position="top right"
+            )
+            
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Usage statistics
+            st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+            st.write("### Usage Insights")
+            
+            # Calculate statistics
+            avg_usage = df_sm['Daily Usage (minutes)'].mean()
+            median_usage = df_sm['Daily Usage (minutes)'].median()
+            
+            # Convert to hours and minutes for display
+            avg_hrs = int(avg_usage // 60)
+            avg_mins = int(avg_usage % 60)
+            
+            median_hrs = int(median_usage // 60)
+            median_mins = int(median_usage % 60)
+            
+            st.write(f"• Average usage: **{avg_hrs}h {avg_mins}m** per day")
+            st.write(f"• Median usage: **{median_hrs}h {median_mins}m** per day")
+            
+            # Calculate percentage in high usage category
+            high_usage = len(df_sm[df_sm['Daily Usage (minutes)'] > 180])  # > 3 hours
+            high_pct = (high_usage / len(df_sm)) * 100
+            
+            low_usage = len(df_sm[df_sm['Daily Usage (minutes)'] < 60])  # < 1 hour
+            low_pct = (low_usage / len(df_sm)) * 100
+            
+            st.write(f"• **{high_pct:.1f}%** spend more than 3 hours daily")
+            st.write(f"• **{low_pct:.1f}%** spend less than 1 hour daily")
+            
+            # Add recommended limit
+            st.write("• Research suggests limiting social media to **30-60 minutes** per day for optimal mental well-being")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Usage by Demographics
+    if 'Daily Usage (minutes)' in df_sm.columns:
+        st.subheader('Social Media Usage by Demographics')
+        
+        # Select demographic to analyze
+        demographic_options = [col for col in ['Age Group', 'Gender', 'Relationship Status', 'Occupation Status'] if col in df_sm.columns]
+        
+        if demographic_options:
+            selected_demographic = st.selectbox(
+                "Select demographic factor to analyze:",
+                options=demographic_options,
+                key="usage_demographic"
+            )
+            
+            # Create analysis
+            usage_analysis = df_sm.groupby(selected_demographic)['Daily Usage (minutes)'].agg(['mean', 'median', 'count']).reset_index()
+            usage_analysis.columns = [selected_demographic, 'Average Usage', 'Median Usage', 'Count']
+            
+            # Sort by average usage
+            usage_analysis = usage_analysis.sort_values('Average Usage', ascending=False)
+            
+            fig = px.bar(
+                usage_analysis,
+                x=selected_demographic,
+                y='Average Usage',
+                title=f'Daily Social Media Usage by {selected_demographic}',
+                color='Average Usage',
+                color_continuous_scale=theme["gradient_colors"][::-1],  # Reversed scale (higher usage is more concerning)
+                text='Count'
+            )
+            fig.update_layout(height=400)
+            fig.update_traces(texttemplate='%{text} participants', textposition='outside')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Insights about the demographic analysis
+            st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+            st.write(f"### Usage by {selected_demographic} Insights")
+            
+            # Find highest and lowest groups
+            highest_group = usage_analysis.iloc[0]
+            lowest_group = usage_analysis.iloc[-1]
+            
+            # Convert to hours and minutes for display, handling NaN values
+            if pd.notna(highest_group['Average Usage']):
+                highest_hrs = int(highest_group['Average Usage'] // 60)
+                highest_mins = int(highest_group['Average Usage'] % 60)
+                highest_time_str = f"{highest_hrs}h {highest_mins}m"
+            else:
+                highest_time_str = "N/A"
+            
+            if pd.notna(lowest_group['Average Usage']):
+                lowest_hrs = int(lowest_group['Average Usage'] // 60)
+                lowest_mins = int(lowest_group['Average Usage'] % 60)
+                lowest_time_str = f"{lowest_hrs}h {lowest_mins}m"
+            else:
+                lowest_time_str = "N/A"
+            
+            st.write(f"• **{highest_group[selected_demographic]}** has the highest average usage (**{highest_time_str}** daily)")
+            st.write(f"• **{lowest_group[selected_demographic]}** has the lowest average usage (**{lowest_time_str}** daily)")
+            
+            # Calculate difference (only if both values are valid)
+            if pd.notna(highest_group['Average Usage']) and pd.notna(lowest_group['Average Usage']) and lowest_group['Average Usage'] > 0:
+                diff_pct = ((highest_group['Average Usage'] - lowest_group['Average Usage']) / lowest_group['Average Usage']) * 100
+                st.write(f"• The difference between highest and lowest groups is **{diff_pct:.1f}%**")
+            
+            # Run statistical test if there are enough groups
+            if len(usage_analysis) > 1:
+                groups = []
+                for group in usage_analysis[selected_demographic]:
+                    group_data = df_sm[df_sm[selected_demographic] == group]['Daily Usage (minutes)'].dropna()
+                    if len(group_data) > 0:
+                        groups.append(group_data)
+                
+                if len(groups) > 1 and all(len(g) > 5 for g in groups):
+                    try:
+                        f_val, p_val = stats.f_oneway(*groups)
+                        st.write(f"• Statistical significance: p-value = **{p_val:.4f}**")
+                        
+                        if p_val < 0.05:
+                            st.write("• The differences between groups are **statistically significant** (p < 0.05)")
+                        else:
+                            st.write("• The differences between groups are **not statistically significant** (p ≥ 0.05)")
+                    except:
+                        st.write("• Unable to perform statistical test with current data")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Social Media Behavior Analysis
+    st.subheader('Social Media Behavior Analysis')
+    
+    # Select behavior columns
+    behavior_cols = [
+        'How often do you find yourself using Social media without a specific purpose?',
+        'How often do you get distracted by Social media when you are busy doing something?',
+        'Do you feel restless if you haven\'t used Social media in a while?'
+    ]
+    
+    # Find available columns in the data
+    available_behavior_cols = [col for col in df_sm.columns if any(b_col in col for b_col in behavior_cols)]
+    
+    if available_behavior_cols:
+        # Create behavior comparison chart
+        behavior_data = []
+        
+        for col in available_behavior_cols:
+            # Calculate percentage for each response level (1-5)
+            for level in range(1, 6):
+                count = (df_sm[col] == level).sum()
+                percentage = (count / len(df_sm)) * 100
+                
+                behavior_data.append({
+                    'Behavior': clean_column_name(col),
+                    'Response Level': level,
+                    'Percentage': percentage
+                })
+        
+        behavior_df = pd.DataFrame(behavior_data)
+        
+        # Create stacked bar chart
+        fig = px.bar(
+            behavior_df,
+            x='Behavior',
+            y='Percentage',
+            color='Response Level',
+            title='Social Media Behavior Patterns',
+            barmode='stack',
+            color_discrete_sequence=theme["chart_colors"],
+            category_orders={'Response Level': [1, 2, 3, 4, 5]}
+        )
+        
+        fig.update_layout(
+            height=500,
+            xaxis_title="Behavior",
+            yaxis_title="Percentage of Participants (%)",
+            legend_title="Response Level<br>(1=Never, 5=Always)"
+        )
+        
         st.plotly_chart(fig, use_container_width=True)
         
-        # Provide insights
+        # Insights about social media behaviors
         st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-        st.write("### Mental Health Insights")
+        st.write("### Social Media Behavior Insights")
         
-        # Calculate correlation between usage time and mental health score
-        usage_mins = df['Daily Usage Time (Minutes)']
-        mh_score = df['Mental Health Score']
-        corr, p_value = stats.pearsonr(usage_mins, mh_score)
+        # Calculate "concerning" behavior percentages (4-5 ratings)
+        concerning_behaviors = {}
         
-        st.write(f"• Correlation between usage time and mental health score: **{corr:.2f}**")
+        for col in available_behavior_cols:
+            concerning = ((df_sm[col] == 4) | (df_sm[col] == 5)).sum()
+            percentage = (concerning / len(df_sm)) * 100
+            concerning_behaviors[clean_column_name(col)] = percentage
         
-        if abs(corr) > 0.3:
-            direction = "positive" if corr > 0 else "negative"
-            st.write(f"• There is a **{direction} correlation** between usage time and mental health.")
-            
-            if corr < 0:
-                st.write("• This suggests that **higher usage time is associated with lower mental health scores**.")
-            else:
-                st.write("• This suggests that **higher usage time is associated with higher mental health scores**.")
-        else:
-            st.write("• The correlation is relatively weak, suggesting that the relationship is complex.")
+        # Sort behaviors by concerning percentage
+        sorted_behaviors = sorted(concerning_behaviors.items(), key=lambda x: x[1], reverse=True)
         
-        # Find optimal usage time
-        optimal_usage = mh_score_by_usage.loc[mh_score_by_usage['Mental Health Score'].idxmax()]
-        st.write(f"• The optimal usage category appears to be **{optimal_usage['Usage Category']}** with an average mental health score of **{optimal_usage['Mental Health Score']:.1f}**.")
+        # Display top concerning behaviors
+        st.write("#### Most Common Problematic Behaviors:")
+        
+        for behavior, percentage in sorted_behaviors:
+            st.write(f"• **{percentage:.1f}%** report frequent **{behavior.lower()}**")
+        
+        # Add interpretation
+        st.write("\n#### Interpretation:")
+        st.write("• Purposeless browsing and distraction are typically the first signs of problematic usage")
+        st.write("• Feeling restless without social media indicates potential dependency")
+        st.write("• Higher levels (4-5) on these behaviors correlate with reduced mental well-being")
         
         st.markdown("</div>", unsafe_allow_html=True)
 
-def show_mental_health_predictor(df):
-    st.markdown("<h2 class='sub-header'>Mental Health Predictor</h2>", unsafe_allow_html=True)
+def show_correlation_analysis(df):
+    st.markdown("<h2 class='sub-header'>Correlation Analysis</h2>", unsafe_allow_html=True)
     
-    st.write("This tool estimates potential mental health impacts based on daily social media usage time.")
+    # Filter to only show participants who use social media
+    sm_users_col = 'Do you use social media'  # Cleaned version without prefix or question mark
+    if sm_users_col in df.columns:
+        df_sm = df[df[sm_users_col].str.lower().str.contains('yes', na=False)]
+    else:
+        df_sm = df
+    
+    # Correlation between usage and mental health
+    if 'Daily Usage (minutes)' in df_sm.columns and 'Mental Health Score' in df_sm.columns:
+        st.subheader('Social Media Usage vs. Mental Health')
+        
+        # Create scatter plot
+        fig = px.scatter(
+            df_sm,
+            x='Daily Usage (minutes)',
+            y='Mental Health Score',
+            title='Social Media Usage vs. Mental Health Score',
+            color='Mental Health Score',
+            color_continuous_scale=theme["gradient_colors"],
+            opacity=0.7,
+            trendline="ols"
+        )
+        
+        fig.update_layout(height=500)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Calculate correlation
+        correlation = df_sm['Daily Usage (minutes)'].corr(df_sm['Mental Health Score'])
+        
+        # Insights about correlation
+        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+        st.write("### Usage vs Mental Health Insights")
+        
+        st.write(f"• Correlation coefficient: **{correlation:.3f}**")
+        
+        # Interpret correlation
+        if correlation < -0.5:
+            st.write("• There is a **strong negative correlation** between daily usage and mental health")
+            st.write("• Higher social media usage is strongly associated with poorer mental health scores")
+        elif correlation < -0.3:
+            st.write("• There is a **moderate negative correlation** between daily usage and mental health")
+            st.write("• Higher social media usage is moderately associated with poorer mental health scores")
+        elif correlation < -0.1:
+            st.write("• There is a **weak negative correlation** between daily usage and mental health")
+            st.write("• Higher social media usage is weakly associated with poorer mental health scores")
+        elif correlation < 0.1:
+            st.write("• There is **no significant correlation** between daily usage and mental health")
+            st.write("• Social media usage alone doesn't appear to predict mental health scores")
+        else:
+            st.write("• There is a **positive correlation** between daily usage and mental health")
+            st.write("• This is contrary to most research findings and may reflect other factors in this sample")
+        
+        # Calculate optimal usage range
+        # Group by usage category and calculate average mental health score
+        if 'Usage Category' in df_sm.columns:
+            usage_mh = df_sm.groupby('Usage Category')['Mental Health Score'].mean().reset_index()
+            
+            # Find category with highest mental health score
+            best_category = usage_mh.loc[usage_mh['Mental Health Score'].idxmax(), 'Usage Category']
+            best_score = usage_mh.loc[usage_mh['Mental Health Score'].idxmax(), 'Mental Health Score']
+            
+            st.write(f"• The **{best_category}** usage group has the highest average mental health score (**{best_score:.1f}**)")
+            st.write("• This suggests a potential 'optimal range' of social media usage for this population")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Mental Health Components Analysis
+    st.subheader('Mental Health Components Analysis')
+    
+    # Select mental health related columns
+    mh_cols = [col for col in df_sm.columns if any(x in col.lower() for x in [
+        'distracted', 'worries', 'concentrate', 'compare', 'validation', 'depressed', 'sleep'
+    ])]
+    
+    if mh_cols and 'Daily Usage (minutes)' in df_sm.columns:
+        # Calculate correlations with usage
+        correlations = []
+        
+        for col in mh_cols:
+            corr = df_sm['Daily Usage (minutes)'].corr(df_sm[col])
+            correlations.append({
+                'Component': clean_column_name(col),
+                'Correlation': corr
+            })
+        
+        # Create dataframe and sort
+        corr_df = pd.DataFrame(correlations)
+        corr_df = corr_df.sort_values('Correlation', ascending=False)
+        
+        # Create bar chart of correlations
+        fig = px.bar(
+            corr_df,
+            x='Component',
+            y='Correlation',
+            title='Correlation Between Social Media Usage and Mental Health Components',
+            color='Correlation',
+            color_continuous_scale=theme["gradient_colors"][::-1]  # Reversed scale (positive correlation often means worse outcomes)
+        )
+        
+        fig.update_layout(height=500)
+        fig.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Insights about components
+        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+        st.write("### Mental Health Components Insights")
+        
+        # Strongest positive correlation (likely a negative outcome)
+        strongest_pos = corr_df.iloc[0] if len(corr_df) > 0 and corr_df.iloc[0]['Correlation'] > 0 else None
+        if strongest_pos is not None:
+            st.write(f"• **{strongest_pos['Component']}** has the strongest positive correlation with usage (**{strongest_pos['Correlation']:.3f}**)")
+            st.write("• This suggests that higher social media usage is most strongly linked to this issue")
+        
+        # Strongest negative correlation (could be positive or negative outcome depending on the question)
+        strongest_neg = corr_df.iloc[-1] if len(corr_df) > 0 and corr_df.iloc[-1]['Correlation'] < 0 else None
+        if strongest_neg is not None:
+            st.write(f"• **{strongest_neg['Component']}** has the strongest negative correlation with usage (**{strongest_neg['Correlation']:.3f}**)")
+        
+        # Interpretation of results
+        st.write("#### Interpretation:")
+        st.write("• Remember that higher scores on these questions indicate **more frequent mental health issues**")
+        st.write("• Positive correlations mean that as social media usage increases, these issues become more frequent")
+        st.write("• The strongest correlations identify the mental health aspects most affected by social media")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Correlation Matrix
+    st.subheader('Correlation Matrix')
+    
+    # Select relevant columns for correlation
+    corr_cols = []
+    
+    # Include usage and mental health scores
+    if 'Daily Usage (minutes)' in df_sm.columns:
+        corr_cols.append('Daily Usage (minutes)')
+    
+    if 'Mental Health Score' in df_sm.columns:
+        corr_cols.append('Mental Health Score')
+    
+    if 'Social Media Impact Score' in df_sm.columns:
+        corr_cols.append('Social Media Impact Score')
+    
+    # Add behavior columns
+    behavior_cols = [
+        'How often do you find yourself using Social media without a specific purpose?',
+        'How often do you get distracted by Social media when you are busy doing something?',
+        'Do you feel restless if you haven\'t used Social media in a while?'
+    ]
+    
+    corr_cols.extend([col for col in df_sm.columns if any(b_col in col for b_col in behavior_cols)])
+    
+    # Add mental health indicator columns (limited selection)
+    mh_indicator_cols = [
+        'How easily distracted are you?',
+        'How much are you bothered by worries?',
+        'Do you find it difficult to concentrate on things?',
+        'How often do you compare yourself to other successful people through the use of social media?',
+        'How often do you feel depressed or down?',
+        'How often do you face issues regarding sleep?'
+    ]
+    
+    corr_cols.extend([col for col in df_sm.columns if any(m_col in col for m_col in mh_indicator_cols)])
+    
+    # Limit to available columns and ensure unique
+    corr_cols = list(set([col for col in corr_cols if col in df_sm.columns]))
+    
+    if len(corr_cols) > 1:
+        # Calculate correlation matrix
+        corr_matrix = df_sm[corr_cols].corr().round(2)
+        
+        # Create clean labels for display
+        clean_labels = {col: clean_column_name(col) for col in corr_cols}
+        corr_matrix_clean = corr_matrix.rename(index=clean_labels, columns=clean_labels)
+        
+        # Create heatmap
+        fig = px.imshow(
+            corr_matrix_clean,
+            text_auto='.2f',
+            aspect="auto",
+            color_continuous_scale='RdBu_r',
+            color_continuous_midpoint=0,
+            title='Correlation Matrix of Social Media and Mental Health Factors'
+        )
+        
+        fig.update_layout(height=700)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Insights about strongest correlations
+        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+        st.write("### Key Correlations")
+        
+        # Find strong correlations (excluding self-correlations)
+        corr_data = corr_matrix.unstack()
+        corr_data = corr_data[corr_data < 1.0]  # Remove self-correlations
+        strongest_corrs = corr_data.abs().sort_values(ascending=False)[:5]  # Top 5 strongest
+        
+        st.write("#### Strongest Relationships:")
+        
+        for idx, corr_value in strongest_corrs.items():
+            var1, var2 = idx
+            direction = "positive" if corr_value > 0 else "negative"
+            strength = "strong" if abs(corr_value) > 0.5 else "moderate"
+            
+            var1_clean = clean_column_name(var1)
+            var2_clean = clean_column_name(var2)
+            
+            st.write(f"• **{var1_clean}** and **{var2_clean}** have a {strength} {direction} correlation (**{corr_value:.2f}**)")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+
+def show_user_segments(df):
+    st.markdown("<h2 class='sub-header'>User Segments Analysis</h2>", unsafe_allow_html=True)
+    
+    # Filter to only show participants who use social media
+    sm_users_col = 'Do you use social media'  # Cleaned version without prefix or question mark
+    if sm_users_col in df.columns:
+        df_sm = df[df[sm_users_col].str.lower().str.contains('yes', na=False)]
+    else:
+        df_sm = df
+    
+    # Check if user segments are available
+    if 'User Segment' not in df_sm.columns:
+        st.warning("User segments could not be created. This may be due to insufficient data or missing required columns.")
+        return
+    
+    # User Segments Overview
+    st.subheader('User Segments Overview')
+    
+    # Count users in each segment
+    segment_counts = df_sm['User Segment'].value_counts().reset_index()
+    segment_counts.columns = ['Segment', 'Count']
+    
+    # Calculate percentages
+    segment_counts['Percentage'] = (segment_counts['Count'] / segment_counts['Count'].sum()) * 100
+    
+    # Colors for segments
+    segment_colors = {
+        'Low Risk': theme["positive_color"],
+        'Moderate Risk': theme["neutral_color"],
+        'High Risk': theme["negative_color"]
+    }
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # User input for daily usage time
-        screen_time = st.slider("Enter your daily social media usage (minutes):", 
-                                min_value=0, max_value=480, value=120, step=15)
+        # Create pie chart of segments
+        fig = px.pie(
+            segment_counts,
+            values='Count',
+            names='Segment',
+            title='Distribution of User Segments',
+            color='Segment',
+            color_discrete_map=segment_colors,
+            hole=0.4
+        )
+        
+        fig.update_traces(textposition='inside', textinfo='percent+label')
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Segment insights
+        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+        st.write("### Segment Insights")
+        
+        for segment, count, percentage in zip(segment_counts['Segment'], segment_counts['Count'], segment_counts['Percentage']):
+            color = segment_colors.get(segment, theme["neutral_color"])
+            st.write(f"• **{segment}**: {count} users ({percentage:.1f}%)")
+        
+        st.write("\n#### What These Segments Mean:")
+        
+        st.write("• **Low Risk**: Uses social media moderately with minimal mental health impact")
+        st.write("• **Moderate Risk**: Shows some signs of problematic usage or mental health concerns")
+        st.write("• **High Risk**: Exhibits significant problematic usage and mental health impacts")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Segment Characteristics
+    st.subheader('Segment Characteristics')
+    
+    # Calculate average metrics by segment
+    segment_metrics = ['Daily Usage (minutes)', 'Mental Health Score', 'Social Media Impact Score']
+    available_metrics = [col for col in segment_metrics if col in df_sm.columns]
+    
+    if available_metrics:
+        segment_profiles = df_sm.groupby('User Segment')[available_metrics].mean().reset_index()
+        
+        # Create radar chart data
+        categories = [clean_column_name(col) for col in available_metrics]
+        
+        # Normalize values for radar chart (0-1 scale)
+        normalized_profiles = segment_profiles.copy()
+        
+        for col in available_metrics:
+            if col == 'Mental Health Score':
+                # For mental health, higher is better, so invert normalization
+                min_val = df_sm[col].min()
+                max_val = df_sm[col].max()
+                normalized_profiles[col] = (segment_profiles[col] - min_val) / (max_val - min_val)
+            else:
+                # For other metrics, lower is better, so invert normalization
+                min_val = df_sm[col].min()
+                max_val = df_sm[col].max()
+                normalized_profiles[col] = 1 - ((segment_profiles[col] - min_val) / (max_val - min_val))
+        
+        # Create radar chart
+        fig = go.Figure()
+        
+        for i, segment in enumerate(normalized_profiles['User Segment']):
+            values = normalized_profiles.iloc[i][available_metrics].tolist()
+            values.append(values[0])  # Close the loop
+            
+            fig.add_trace(go.Scatterpolar(
+                r=values,
+                theta=categories + [categories[0]],  # Close the loop
+                fill='toself',
+                name=segment,
+                line_color=segment_colors.get(segment, theme["chart_colors"][i])
+            ))
+        
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 1]
+                )
+            ),
+            title="Segment Characteristics",
+            height=500
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show actual values in a table
+        st.write("### Segment Profiles (Actual Values)")
+        
+        # Format the table for display
+        display_profiles = segment_profiles.copy()
+        
+        # Round values for display
+        for col in available_metrics:
+            display_profiles[col] = display_profiles[col].round(1)
+        
+        # Rename columns for display
+        display_profiles = display_profiles.rename(columns={col: clean_column_name(col) for col in available_metrics})
+        
+        # Display the table
+        st.dataframe(display_profiles, use_container_width=True)
+    
+    # Segment Demographics
+    st.subheader('Segment Demographics')
+    
+    # Select demographic to analyze
+    demographic_options = [col for col in ['Age Group', 'Gender', 'Relationship Status', 'Occupation Status'] if col in df_sm.columns]
+    
+    if demographic_options:
+        selected_demographic = st.selectbox(
+            "Select demographic to analyze by segment:",
+            options=demographic_options,
+            key="segment_demographic"
+        )
+        
+        # Create cross-tabulation
+        segment_demographic = pd.crosstab(
+            df_sm[selected_demographic],
+            df_sm['User Segment'],
+            normalize='index'
+        ) * 100
+        
+        # Create heatmap
+        fig = px.imshow(
+            segment_demographic,
+            text_auto='.1f',
+            aspect="auto",
+            labels=dict(x="User Segment", y=selected_demographic, color="Percentage (%)"),
+            title=f'User Segments by {selected_demographic}',
+            color_continuous_scale='Blues'
+        )
+        
+        fig.update_layout(height=500)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Insights about demographics and segments
+        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+        st.write(f"### {selected_demographic} Segment Insights")
+        
+        # Find highest percentage for each segment
+        for segment in segment_demographic.columns:
+            max_group = segment_demographic[segment].idxmax()
+            max_value = segment_demographic.loc[max_group, segment]
+            
+            st.write(f"• **{max_group}** has the highest percentage of **{segment}** users (**{max_value:.1f}%**)")
+        
+        # Add interpretation
+        st.write("\n#### Key Observations:")
+        
+        # Check some common patterns
+        if 'Age Group' in selected_demographic:
+            if 'Under 18' in segment_demographic.index or '18-24' in segment_demographic.index:
+                st.write("• Younger users typically show higher social media dependency and mental health impacts")
+            if '45+' in segment_demographic.index:
+                st.write("• Older users often show more moderate and purposeful social media usage")
+        
+        elif 'Gender' in selected_demographic:
+            if 'Female' in segment_demographic.index and 'Male' in segment_demographic.index:
+                female_high_risk = segment_demographic.loc['Female', 'High Risk'] if 'High Risk' in segment_demographic.columns else 0
+                male_high_risk = segment_demographic.loc['Male', 'High Risk'] if 'High Risk' in segment_demographic.columns else 0
+                
+                if female_high_risk > male_high_risk:
+                    st.write("• Female users show higher representation in the high-risk segment")
+                    st.write("• Research suggests women may experience more negative social comparison on social media")
+                elif male_high_risk > female_high_risk:
+                    st.write("• Male users show higher representation in the high-risk segment")
+                else:
+                    st.write("• Gender differences in high-risk segment are minimal")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Segment Recommendations
+    st.subheader('Segment-Specific Recommendations')
+    
+    # Create recommendations for each segment
+    recommendations = {
+        'Low Risk': [
+            "Continue your balanced approach to social media use",
+            "Schedule regular digital detox days to maintain healthy boundaries",
+            "Be mindful of content that may trigger comparison or anxiety",
+            "Continue to prioritize real-world social connections",
+            "Share your positive social media habits with others"
+        ],
+        'Moderate Risk': [
+            "Consider setting daily time limits for social media use",
+            "Use app features to track and limit your usage",
+            "Take regular breaks from social media, especially before bedtime",
+            "Be selective about who you follow and the content you consume",
+            "Practice mindfulness when feeling the urge to check social media",
+            "Schedule specific times for checking social media rather than continuous checking"
+        ],
+        'High Risk': [
+            "Consider a 1-2 week digital detox to reset your relationship with social media",
+            "Install apps that limit social media usage and track screen time",
+            "Turn off all non-essential notifications",
+            "Remove social media apps from your home screen or delete them temporarily",
+            "Schedule alternative activities during peak usage times",
+            "Practice the 'stop, breathe, reflect' technique when feeling the urge to check social media",
+            "Consider speaking with a mental health professional about healthy digital boundaries",
+            "Join support groups for digital wellbeing"
+        ]
+    }
+    
+    # Display recommendations
+    for segment, recs in recommendations.items():
+        color = segment_colors.get(segment, theme["neutral_color"])
+        
+        st.markdown(f"""
+        <div style="
+            border-left: 5px solid {color}; 
+            background-color: {theme['box_background']}; 
+            padding: 15px; 
+            border-radius: 5px; 
+            margin-bottom: 20px;">
+            <h4 style="color: {color};">{segment} Recommendations</h4>
+            <ul>
+        """, unsafe_allow_html=True)
+        
+        for rec in recs:
+            st.markdown(f"<li>{rec}</li>", unsafe_allow_html=True)
+        
+        st.markdown("</ul></div>", unsafe_allow_html=True)
+
+def show_mental_health_predictor(df):
+    st.markdown("<h2 class='sub-header'>Mental Health Predictor</h2>", unsafe_allow_html=True)
+    
+    st.write("This tool predicts your mental health score based on social media usage patterns.")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # User inputs
+        st.subheader("Enter Your Social Media Usage Patterns")
+        
+        daily_usage = st.slider(
+            "Average time spent on social media daily (minutes):",
+            min_value=0,
+            max_value=360,
+            value=120,
+            step=15
+        )
+        
+        distraction_level = st.slider(
+            "How often do you get distracted by social media? (1=Never, 5=Always)",
+            min_value=1,
+            max_value=5,
+            value=3
+        )
+        
+        comparison_frequency = st.slider(
+            "How often do you compare yourself to others on social media? (1=Never, 5=Always)",
+            min_value=1,
+            max_value=5,
+            value=3
+        )
+        
+        validation_seeking = st.slider(
+            "How often do you seek validation through social media? (1=Never, 5=Always)",
+            min_value=1,
+            max_value=5,
+            value=2
+        )
         
         # Calculate predicted mental health score
-        predicted_score = calculate_mental_health_score(screen_time)
+        predicted_score = predict_mental_health(
+            daily_usage,
+            distraction_level,
+            comparison_frequency,
+            validation_seeking
+        )
+        
+        # Get category and color
         category, color = get_mental_health_category(predicted_score)
         
         # Display results
         st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
-        st.write("### Predicted Mental Health Impact")
-        
-        # Display score with colored bar
-        st.write(f"Based on **{screen_time} minutes** of daily social media usage:")
+        st.write("### Your Predicted Mental Health Score")
         
         # Create a progress bar for score visualization
         st.markdown(f"""
@@ -895,77 +1778,146 @@ def show_mental_health_predictor(df):
         
         st.markdown(f"<h3 style='color: {color}; text-align: center; margin: 20px 0;'>Mental Health Category: {category}</h3>", unsafe_allow_html=True)
         
-        # Recommendations based on score
-        st.write("### Recommendations")
+        # Personalized recommendations based on score
+        st.write("### Your Personalized Recommendations")
         
-        if predicted_score >= 80:
-            st.write("• Your social media usage appears well-balanced")
-            st.write("• Continue maintaining healthy boundaries with technology")
-            st.write("• Focus on quality interactions rather than quantity")
-        elif predicted_score >= 60:
-            st.write("• Your social media usage is generally healthy")
-            st.write("• Consider periodic digital detox days")
-            st.write("• Be mindful of content that triggers negative emotions")
-        elif predicted_score >= 40:
-            st.write("• Your usage is at a moderate level with some risk")
-            st.write("• Try to reduce screen time by 15-30 minutes daily")
-            st.write("• Schedule specific times for checking social media")
-            st.write("• Use apps to monitor and limit your usage")
-        elif predicted_score >= 20:
-            st.write("• Your usage pattern shows risk for mental health")
-            st.write("• Consider reducing usage by 30-50%")
-            st.write("• Replace some social media time with offline activities")
-            st.write("• Be selective about platforms and content")
-        else:
-            st.write("• Your usage pattern shows high risk for mental health")
-            st.write("• Consider a significant reduction in screen time")
-            st.write("• Seek support if you find it difficult to reduce usage")
+        if predicted_score >= 75:  # Excellent
+            st.write("• Your social media habits appear to be healthy and balanced")
+            st.write("• Continue to be mindful about usage and content consumption")
+            st.write("• Consider sharing your positive social media strategies with others")
+            st.write("• Schedule occasional digital detox days to maintain your good habits")
+        elif predicted_score >= 60:  # Good
+            st.write("• Your social media habits are generally healthy")
+            st.write(f"• Consider reducing daily usage to under {max(60, daily_usage - 30)} minutes")
+            st.write("• Be aware of how comparison affects your mood and self-esteem")
+            st.write("• Set specific times for checking social media rather than random browsing")
+        elif predicted_score >= 45:  # Moderate
+            st.write(f"• Reducing your daily usage to under {max(60, daily_usage - 45)} minutes could improve your mental well-being")
+            st.write("• Practice mindfulness techniques when feeling the urge to check social media")
+            st.write("• Turn off non-essential notifications to reduce distractions")
+            st.write("• Be more selective about accounts you follow and content you consume")
+        elif predicted_score >= 30:  # Concerning
+            st.write("• Your social media habits may be negatively impacting your mental health")
+            st.write(f"• Try to cut your usage by half (to about {daily_usage // 2} minutes daily)")
+            st.write("• Consider a 1-week social media break to reset your relationship with these platforms")
+            st.write("• Use apps to monitor and limit your screen time")
             st.write("• Focus on real-world connections and activities")
+        else:  # Poor
+            st.write("• Your current social media usage patterns show strong indicators of negative mental health impact")
+            st.write("• Consider a 2-3 week digital detox to reset your relationship with social media")
+            st.write("• Delete social media apps from your phone temporarily")
+            st.write("• Schedule alternative activities during times you'd normally browse")
+            st.write("• Consider speaking with a mental health professional about digital wellbeing")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
     with col2:
-        # Show usage distribution with marker for user input
-        fig = px.histogram(df, x='Daily Usage Time (Minutes)', 
-                          nbins=20,
-                          title='Where You Stand Compared to Others',
-                          opacity=0.7,
-                          color_discrete_sequence=[theme["chart_colors"][0]])
-        
-        # Add vertical line for user input
-        fig.add_vline(x=screen_time, 
-                     line_dash="dash", 
-                     line_color=color, 
-                     annotation_text="Your Usage", 
-                     annotation_position="top")
-        
-        fig.update_layout(height=300)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Show mental health score by usage category
-        if 'Mental Health Score' in df.columns:
-            mh_score_by_usage = df.groupby('Usage Category')['Mental Health Score'].mean().reset_index()
+        # Show comparative charts
+        if 'Daily Usage (minutes)' in df.columns:
+            # Usage distribution with marker for user input
+            usage_data = df[df['Daily Usage (minutes)'].notna()]['Daily Usage (minutes)']
             
-            # Ensure the categories are in the correct order
-            usage_order = ['< 30 min', '30-60 min', '1-2 hours', '2-4 hours', '4+ hours']
-            mh_score_by_usage['Usage Category'] = pd.Categorical(
-                mh_score_by_usage['Usage Category'], 
+            fig = px.histogram(
+                usage_data,
+                nbins=20,
+                title='How Your Usage Compares',
+                opacity=0.7,
+                color_discrete_sequence=[theme["chart_colors"][0]]
+            )
+            
+            # Add vertical line for user input
+            fig.add_vline(
+                x=daily_usage,
+                line_dash="dash",
+                line_color=color,
+                annotation_text="Your Usage",
+                annotation_position="top"
+            )
+            
+            # Add average line
+            avg_usage = usage_data.mean()
+            fig.add_vline(
+                x=avg_usage,
+                line_dash="dot",
+                line_color="gray",
+                annotation_text="Average",
+                annotation_position="bottom"
+            )
+            
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Show mental health by usage category
+        if 'Mental Health Score' in df.columns and 'Usage Category' in df.columns:
+            # Calculate average mental health score by usage category
+            mh_by_usage = df.groupby('Usage Category')['Mental Health Score'].mean().reset_index()
+            
+            # Define order of categories
+            usage_order = ['< 1 hour', '1-2 hours', '2-3 hours', '3-4 hours', '4+ hours']
+            
+            # Create categorical variable with proper ordering
+            mh_by_usage['Usage Category'] = pd.Categorical(
+                mh_by_usage['Usage Category'],
                 categories=usage_order,
                 ordered=True
             )
-            mh_score_by_usage = mh_score_by_usage.sort_values('Usage Category')
             
-            fig = px.line(mh_score_by_usage,
-                         x='Usage Category',
-                         y='Mental Health Score',
-                         title='Mental Health Score by Usage Category',
-                         markers=True,
-                         color_discrete_sequence=[theme["chart_colors"][1]])
+            # Sort by category
+            mh_by_usage = mh_by_usage.sort_values('Usage Category')
             
-            fig.update_layout(height=300,
-                             xaxis_title="Daily Usage Time",
-                             yaxis_title="Avg. Mental Health Score")
+            # Create bar chart
+            fig = px.bar(
+                mh_by_usage,
+                x='Usage Category',
+                y='Mental Health Score',
+                title='Mental Health Score by Usage',
+                color='Mental Health Score',
+                color_continuous_scale=theme["gradient_colors"]
+            )
+            
+            # Determine user's usage category
+            user_category = None
+            if daily_usage < 60:
+                user_category = '< 1 hour'
+            elif daily_usage < 120:
+                user_category = '1-2 hours'
+            elif daily_usage < 180:
+                user_category = '2-3 hours'
+            elif daily_usage < 240:
+                user_category = '3-4 hours'
+            else:
+                user_category = '4+ hours'
+            
+            # Highlight user's category if it exists in the data
+            if user_category in mh_by_usage['Usage Category'].values:
+                # Find index of user's category
+                idx = mh_by_usage[mh_by_usage['Usage Category'] == user_category].index[0]
+                
+                # Add annotation
+                fig.add_annotation(
+                    x=user_category,
+                    y=mh_by_usage.loc[idx, 'Mental Health Score'],
+                    text="Your Usage Range",
+                    showarrow=True,
+                    arrowhead=1,
+                    ax=0,
+                    ay=-40
+                )
+            
+            fig.update_layout(height=300)
             st.plotly_chart(fig, use_container_width=True)
+        
+        # Add some context about the prediction model
+        st.markdown("<div class='insight-box'>", unsafe_allow_html=True)
+        st.write("### About This Predictor")
+        st.write("This tool uses data from our survey of social media users to predict mental health impacts.")
+        st.write("The model considers:")
+        st.write("• Daily usage time")
+        st.write("• Distraction patterns")
+        st.write("• Social comparison behaviors")
+        st.write("• Validation-seeking behaviors")
+        st.write("These factors have shown strong correlations with mental health outcomes in research.")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     show_dashboard()
